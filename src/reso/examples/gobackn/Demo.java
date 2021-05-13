@@ -21,7 +21,7 @@ public class Demo
 
     		IPHost host1= NetworkBuilder.createHost(network, "H1", IP_ADDR1, MAC_ADDR1);
     		host1.getIPLayer().addRoute(IP_ADDR2, "eth0");
-    		host1.addApplication(new AppSender(host1, IP_ADDR2, 10));
+    		host1.addApplication(new AppSender(host1, IP_ADDR2, 11));
 
     		IPHost host2= NetworkBuilder.createHost(network,"H2", IP_ADDR2, MAC_ADDR2);
     		host2.getIPLayer().addRoute(IP_ADDR1, "eth0");

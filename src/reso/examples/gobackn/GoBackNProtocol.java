@@ -44,6 +44,11 @@ public class GoBackNProtocol implements IPInterfaceListener {
     private int next_seq_number = 0;
 
     /**
+     * Numero de sequence courrant a attribuer dans le buffer
+     */
+    private int seq_number = 0;
+
+    /**
      * Last message acknowledged
      */
 	private Datagram last_ack = null;
@@ -59,7 +64,7 @@ public class GoBackNProtocol implements IPInterfaceListener {
     private IPAddress current_dest;
 
     /** Duration of RTT in seconds (simulated time) */
-    private static double RTT = 0.2;
+    private static double RTT = 0.01;
 
     private AbstractTimer timer;
 
@@ -76,12 +81,33 @@ public class GoBackNProtocol implements IPInterfaceListener {
 				" host=" + host.name + ", dgram.src=" + datagram.src + ", dgram.dst=" +
 				datagram.dst + ", iif=" + src + ", data=" + segment);
         if(segment.isAck()){
-           send_base = segment.sequenceNumber +1;
-           if(send_base == next_seq_number){
-               stopTimer();
-           }else {
-               startTimer();
-           }
+            int previous_sb = send_base;
+            send_base = segment.sequenceNumber +1;
+            TCPSegment localSegment;
+
+            if(send_base == next_seq_number){
+                stopTimer();
+            }else {
+                if( send_base < pending_msg.size()){
+                    startTimer(pending_msg.get(send_base));
+                }
+            }
+
+            /**
+             * Faire evoluer la fenetre d'emission par rapport au buffer de messages en attentent
+             */
+            for(int i = previous_sb + window_size; i < send_base + window_size; i++){
+                /**
+                 * Verifier s'il existe un prochain message en attente dans le buffer
+                 */
+                if(i < pending_msg.size() && i >= window_size){
+                    window.add(i, pending_msg.get(i));
+                    send(current_dest, pending_msg.get(i));
+                }
+                else{
+                    break;
+                }
+            }
         }
         else{
            if(exp_seq_number == segment.sequenceNumber){
@@ -98,27 +124,38 @@ public class GoBackNProtocol implements IPInterfaceListener {
     public void sendData(int data, IPAddress destination) throws Exception{
         int[] segmentData = new int[]{data};
         current_dest = destination;
-        TCPSegment tcpSegment = new TCPSegment(segmentData, next_seq_number);
+        TCPSegment tcpSegment = new TCPSegment(segmentData, seq_number);
 
-        AbstractTimer lossTimer = new SimulateLossTimer( host.getNetwork().getScheduler(), RTT/2);
-        lossTimer.start();
+        pending_msg.add(tcpSegment);
+//
+//        AbstractTimer lossTimer = new SimulateLossTimer( host.getNetwork().getScheduler(), RTT/2);
+//        lossTimer.start();
 
-        if(next_seq_number <  send_base + window_size){
-            window.add(next_seq_number, tcpSegment);
-            host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
-
-            if(send_base == next_seq_number){
-                startTimer();
-            }
-            next_seq_number++;
+        if(seq_number <  window_size){
+            window.add(seq_number, tcpSegment);
+            send(destination,tcpSegment);
+//            host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
+//
+//            if(send_base == next_seq_number){
+//                startTimer();
+//            }
+//            next_seq_number++;
         }
-        else {
-            pending_msg.add(tcpSegment);
+
+        seq_number++;
+    }
+
+    private void send(IPAddress destination, TCPSegment tcpSegment) throws Exception{
+        host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
+
+        if(send_base == next_seq_number){
+            startTimer(tcpSegment);
         }
+        next_seq_number++;
     }
 
     public void timeOut() throws Exception{
-	    startTimer();
+	    startTimer(window.get(send_base));
         for(int i = send_base; i < next_seq_number; i++){
             host.getIPLayer().send(IPAddress.ANY, current_dest, IP_PROTO_GOBACKN, window.get(i));
         }
@@ -139,12 +176,12 @@ public class GoBackNProtocol implements IPInterfaceListener {
 	    this.window_size = window_size;
     }
 
-    public void startTimer(){
+    public void startTimer(TCPSegment tcpSegment){
 	    if(timer != null){
             timer.stop();
         }
 
-	    timer = new MyTimer( host.getNetwork().getScheduler(), RTT);
+	    timer = new MyTimer(tcpSegment, host.getNetwork().getScheduler(), RTT);
         timer.start();
     }
 
@@ -154,13 +191,14 @@ public class GoBackNProtocol implements IPInterfaceListener {
 
     private class MyTimer extends AbstractTimer {
 
-        public MyTimer(AbstractScheduler scheduler, double interval) {
-            super(scheduler, interval,true);
+	    TCPSegment segment;
+        public MyTimer(TCPSegment tcpSegment, AbstractScheduler scheduler, double interval) {
+            super(scheduler, interval,false);
+            this.segment = tcpSegment;
         }
 
-        @Override
         public void run() throws Exception{
-            System.out.println("Current Time: " + scheduler.getCurrentTime()*1000 + "ms");
+            System.out.println("Time Out data: "+segment+ " - Current Time: " + scheduler.getCurrentTime()*1000 + "ms");
             timeOut();
 //            while ((host.getNetwork().getScheduler().getCurrentTime() < rtt)){
 //            }
@@ -177,7 +215,6 @@ public class GoBackNProtocol implements IPInterfaceListener {
             super(scheduler, interval,false);
         }
 
-        @Override
         public void run() throws Exception{
             System.out.println("Simulate the loss of a sequence number data:" + next_seq_number);
             System.out.println("Current Time: " + scheduler.getCurrentTime()*1000 + "ms");

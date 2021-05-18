@@ -10,6 +10,7 @@ import reso.ip.IPLayer;
 import reso.scheduler.AbstractScheduler;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
 public class GoBackNProtocol implements IPInterfaceListener {
@@ -64,14 +65,16 @@ public class GoBackNProtocol implements IPInterfaceListener {
     private IPAddress current_dest;
 
     /** Duration of RTT in seconds (simulated time) */
-    private static double RTT = 0.01;
+    private static double rtt = 0.01;
 
     private AbstractTimer timer;
 
+    private HashMap<Integer, RTT> RTTs = new HashMap<>();
 
 	public GoBackNProtocol(IPHost host) {
 		this.host= host;
     	host.getIPLayer().addListener(this.IP_PROTO_GOBACKN, this);
+//    	RTT.scheduler = this.host.getNetwork().getScheduler();
 	}
 	
 	@Override
@@ -80,10 +83,15 @@ public class GoBackNProtocol implements IPInterfaceListener {
 		System.out.println("Data (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)" +
 				" host=" + host.name + ", dgram.src=" + datagram.src + ", dgram.dst=" +
 				datagram.dst + ", iif=" + src + ", data=" + segment);
+
         if(segment.isAck()){
             int previous_sb = send_base;
             send_base = segment.sequenceNumber +1;
-            TCPSegment localSegment;
+
+            RTT rtt = RTTs.get(segment.sequenceNumber);
+            if (!rtt.retransmission){ // Verifier si ce n'est pas une retransmission du message pour ne pas le considere dans le calcul du RTT
+                rtt.on_receive(host.getNetwork().getScheduler());// Detecter la reception de l'Acquittement et Recalculer le RTT ainsi que le RTO
+            }
 
             if(send_base == next_seq_number){
                 stopTimer();
@@ -94,13 +102,10 @@ public class GoBackNProtocol implements IPInterfaceListener {
             }
 
             /**
-             * Faire evoluer la fenetre d'emission par rapport au buffer de messages en attentent
+             * Faire évoluer la fenêtre d'émission par rapport au buffer de messages en attentent
              */
             for(int i = previous_sb + window_size; i < send_base + window_size; i++){
-                /**
-                 * Verifier s'il existe un prochain message en attente dans le buffer
-                 */
-                if(i < pending_msg.size() && i >= window_size){
+                if(i < pending_msg.size() && i >= window_size){ // Verifier s'il existe un prochain message en attente dans le buffer
                     window.add(i, pending_msg.get(i));
                     send(current_dest, pending_msg.get(i));
                 }
@@ -110,12 +115,12 @@ public class GoBackNProtocol implements IPInterfaceListener {
             }
         }
         else{
-           if(exp_seq_number == segment.sequenceNumber){
-               last_ack = datagram;
+           if(exp_seq_number == segment.sequenceNumber){// Si le message est celui attendu (arrivé dans l'ordre)
+               last_ack = datagram;// Sauver le dernier datagram acquitte en cas d'une potentielle retransmission
                sendAcknowledgment(datagram);
                exp_seq_number++;
-           }else if(last_ack != null){
-               System.out.println("Data "+ segment + " arrived out of order");
+           }else if(last_ack != null){ // Si le message recue n'est celui attendu (perdu ou arrivé dans le désordre)
+               System.out.println("Warning! Data (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)"+ segment + " arrived out of order");
                sendLastAcknowledgment(last_ack);
            }
         }
@@ -146,11 +151,20 @@ public class GoBackNProtocol implements IPInterfaceListener {
     }
 
     private void send(IPAddress destination, TCPSegment tcpSegment) throws Exception{
-        host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
-
         if(send_base == next_seq_number){
             startTimer(tcpSegment);
         }
+
+        if (RTTs.get(next_seq_number) == null){ // Démarrer le calcul du RTT dans le cas d'une non retransmission
+            RTT rtt = new RTT(next_seq_number);
+            rtt.on_send(host.getNetwork().getScheduler());
+            RTTs.put(next_seq_number,rtt);
+        }else { // Marquer le RTT de referencement du message comme une retransmission pour ne pas le prendre en compte dans le calcul
+            RTTs.get(next_seq_number).retransmission = true;
+        }
+
+        host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
+
         next_seq_number++;
     }
 
@@ -162,14 +176,13 @@ public class GoBackNProtocol implements IPInterfaceListener {
     }
 
     private void sendAcknowledgment(Datagram datagram) throws Exception{
-        TCPSegment segment= (TCPSegment) datagram.getPayload();
         host.getIPLayer().send(IPAddress.ANY, datagram.src, IP_PROTO_GOBACKN, new TCPSegment(exp_seq_number));
     }
 
-    private void sendLastAcknowledgment(Datagram datagram) throws Exception{
-        TCPSegment segment= (TCPSegment) datagram.getPayload();
+    private void sendLastAcknowledgment(Datagram lastDatagramAck) throws Exception{
+        TCPSegment segment= (TCPSegment) lastDatagramAck.getPayload();
         System.out.println("Resend the last acknowledgment"+ segment );
-        host.getIPLayer().send(IPAddress.ANY, datagram.src, IP_PROTO_GOBACKN, new TCPSegment(exp_seq_number));
+        host.getIPLayer().send(IPAddress.ANY, lastDatagramAck.src, IP_PROTO_GOBACKN, new TCPSegment(segment.sequenceNumber));
     }
 
     public void setWindow_size(int window_size){
@@ -181,7 +194,7 @@ public class GoBackNProtocol implements IPInterfaceListener {
             timer.stop();
         }
 
-	    timer = new MyTimer(tcpSegment, host.getNetwork().getScheduler(), RTT);
+	    timer = new MyTimer(tcpSegment, host.getNetwork().getScheduler(), rtt);
         timer.start();
     }
 

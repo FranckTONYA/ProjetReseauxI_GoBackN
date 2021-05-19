@@ -71,6 +71,13 @@ public class GoBackNProtocol implements IPInterfaceListener {
 
     private HashMap<Integer, RTT> RTTs = new HashMap<>();
 
+    private int MSS = Integer.SIZE / 8; // Taille des messages (entier) en octets
+    private int cwnd = MSS; // Fenêtre de congestion
+    private boolean isSlowStart = true; // True si c'est en phase de Slow Start et False si c'est en phase d'AIMD (Congestion Avoidance)
+    private int sstresh = 2000; // Slow start Threshold
+
+    private int duplicateACKs = 0; // Nombre d'acquittements dupliqués
+
 	public GoBackNProtocol(IPHost host) {
 		this.host= host;
     	host.getIPLayer().addListener(this.IP_PROTO_GOBACKN, this);
@@ -85,6 +92,26 @@ public class GoBackNProtocol implements IPInterfaceListener {
 				datagram.dst + ", iif=" + src + ", data=" + segment);
 
         if(segment.isAck()){
+
+            if (segment.sequenceNumber == send_base){//Calculer le nombre de fois qu'un acquittement dupliqué est recu
+                duplicateACKs++;
+            }
+
+            if(isSlowStart){ // Si c'est en phase de Slow Start
+                if (cwnd >= sstresh){ // Si la fenêtre arrive au seuil(sstresh), on passe a la phase d'AIMD
+                    isSlowStart = false;
+                }else { // Si n'est pas arrive a son seuil, on incremente la fenêtre de congestion d'un MSS
+                    slowStart();
+                }
+
+            }else { // Si c'est en phase d'AIMD (Congestion Avoidance)
+                if (duplicateACKs == 3){ // S'il ya 3 acquittements dupliqués
+                    cwnd = cwnd/2;
+                }
+
+                addIncrease();
+            }
+
             int previous_sb = send_base;
             send_base = segment.sequenceNumber +1;
 
@@ -169,6 +196,15 @@ public class GoBackNProtocol implements IPInterfaceListener {
     }
 
     public void timeOut() throws Exception{
+	    if (isSlowStart){
+	        sstresh = cwnd/2;
+	        isSlowStart = false;
+        }else {
+	        cwnd = MSS;
+	        sstresh = sstresh/2;
+	        isSlowStart = true;
+        }
+
 	    startTimer(window.get(send_base));
         for(int i = send_base; i < next_seq_number; i++){
             host.getIPLayer().send(IPAddress.ANY, current_dest, IP_PROTO_GOBACKN, window.get(i));
@@ -235,5 +271,26 @@ public class GoBackNProtocol implements IPInterfaceListener {
             next_seq_number ++;
 
         }
+    }
+
+    /**
+     * Augmentation additive de la fenêtre de congestion
+     */
+    private void addIncrease(){ // Additive increase
+        cwnd = cwnd + (MSS * MSS / cwnd);
+    }
+
+    /**
+     * Diminution multiplicative de la fenêtre de congestion
+     */
+    private void multDecrease(){ // Multiplicative decrease
+        cwnd = cwnd / 2;
+    }
+
+    /**
+     * Incremente la fenetre de congestion d'un MSS en phase de Slow start
+     */
+    private void slowStart(){
+	    cwnd = cwnd + MSS;
     }
 }

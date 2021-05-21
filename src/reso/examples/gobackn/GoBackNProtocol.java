@@ -19,10 +19,10 @@ public class GoBackNProtocol implements IPInterfaceListener {
 	
 	private final IPHost host;
 
-    /**
-     * Send window size
-     */
-    private int window_size = 10;
+//    /**
+//     * Send window size
+//     */
+//    private int window_size = 10;
 
     /**
      * Send window
@@ -65,23 +65,42 @@ public class GoBackNProtocol implements IPInterfaceListener {
     private IPAddress current_dest;
 
     /** Duration of RTT in seconds (simulated time) */
-    private static double rtt = 0.01;
+//    private static double rtt = 0.01;
 
     private AbstractTimer timer;
 
     private HashMap<Integer, RTT> RTTs = new HashMap<>();
 
-    private int MSS = Integer.SIZE / 8; // Taille des messages (entier) en octets
-    private int cwnd = MSS; // Fenêtre de congestion
-    private boolean isSlowStart = true; // True si c'est en phase de Slow Start et False si c'est en phase d'AIMD (Congestion Avoidance)
-    private int sstresh = 2000; // Slow start Threshold
+    /**
+     * Taille des messages en paquet
+     */
+    private int MSS = 1;
+    /**
+     * Fenêtre de congestion
+     */
+    private int cwnd = MSS;
+    /**
+     * True si c'est en phase de Slow Start et False si c'est en phase d'AIMD (Congestion Avoidance)
+     */
+    private boolean isSlowStart = true;
+    /**
+     * Slow start Threshold
+     */
+    private int ssthresh = 100;
 
-    private int duplicateACKs = 0; // Nombre d'acquittements dupliqués
+    /**
+     * Nombre d'acquittements dupliqués
+     */
+    private int duplicateACKs = 0;
+
+
 
 	public GoBackNProtocol(IPHost host) {
 		this.host= host;
     	host.getIPLayer().addListener(this.IP_PROTO_GOBACKN, this);
-//    	RTT.scheduler = this.host.getNetwork().getScheduler();
+    	RTT.scheduler = this.host.getNetwork().getScheduler();
+    	init_log_cwn();
+    	init_log_congControl();
 	}
 	
 	@Override
@@ -91,24 +110,28 @@ public class GoBackNProtocol implements IPInterfaceListener {
 				" host=" + host.name + ", dgram.src=" + datagram.src + ", dgram.dst=" +
 				datagram.dst + ", iif=" + src + ", data=" + segment);
 
-        if(segment.isAck()){
+        if(segment.isAck()){  // Si le paquet recu est un acquittement
 
-            if (segment.sequenceNumber == send_base){//Calculer le nombre de fois qu'un acquittement dupliqué est recu
+            if (segment.sequenceNumber == (send_base - 1) ){ //Si l'acquittement correspond au dernier paquet deja acquitté, calculer le nombre de fois qu'un acquittement dupliqué est recu
                 duplicateACKs++;
             }
 
+            /**
+             * Fast recovery, implementing multiplicative decrease. cwnd will not drop below 1 MSS.
+             */
+            if (duplicateACKs == 3){ // S'il ya 3 acquittements dupliqués
+                multiplDecrease();
+                isSlowStart = false;
+            }
+
             if(isSlowStart){ // Si c'est en phase de Slow Start
-                if (cwnd >= sstresh){ // Si la fenêtre arrive au seuil(sstresh), on passe a la phase d'AIMD
+                if (cwnd > ssthresh){ // Si la fenêtre arrive au seuil(ssthresh), on passe au Congestion Avoidance
                     isSlowStart = false;
-                }else { // Si n'est pas arrive a son seuil, on incremente la fenêtre de congestion d'un MSS
+                }else { // Si n'est pas arrivé a son seuil, on incremente la fenêtre de congestion d'un MSS
                     slowStart();
                 }
 
             }else { // Si c'est en phase d'AIMD (Congestion Avoidance)
-                if (duplicateACKs == 3){ // S'il ya 3 acquittements dupliqués
-                    cwnd = cwnd/2;
-                }
-
                 addIncrease();
             }
 
@@ -117,22 +140,22 @@ public class GoBackNProtocol implements IPInterfaceListener {
 
             RTT rtt = RTTs.get(segment.sequenceNumber);
             if (!rtt.retransmission){ // Verifier si ce n'est pas une retransmission du message pour ne pas le considere dans le calcul du RTT
-                rtt.on_receive(host.getNetwork().getScheduler());// Detecter la reception de l'Acquittement et Recalculer le RTT ainsi que le RTO
+                rtt.on_receive();// Detecter la reception de l'Acquittement et Recalculer le RTT ainsi que le RTO
             }
 
-            if(send_base == next_seq_number){
+            if(send_base == next_seq_number){ // Si le message acquitté est le dernier de la fenêtre d'émission
                 stopTimer();
             }else {
-                if( send_base < pending_msg.size()){
-                    startTimer(pending_msg.get(send_base));
+                if( send_base < window.size()){ // Si ya encore des paquets envoyé dans la fenêtre d'émission (en attente d'acquittement)
+                    startTimer(window.get(send_base)); // Démarrer le Timer pour le plus vieux message de la fenêtre d'émission
                 }
             }
 
             /**
              * Faire évoluer la fenêtre d'émission par rapport au buffer de messages en attentent
              */
-            for(int i = previous_sb + window_size; i < send_base + window_size; i++){
-                if(i < pending_msg.size() && i >= window_size){ // Verifier s'il existe un prochain message en attente dans le buffer
+            for(int i = next_seq_number; i < send_base + cwnd; i++){ // A partir du dernier numéro de sequence a utiliser jusqu'au nombre de place disponible dans la fenêtre d'émission
+                if(i < pending_msg.size()){ // Verifier s'il existe un prochain message en attente dans le buffer
                     window.add(i, pending_msg.get(i));
                     send(current_dest, pending_msg.get(i));
                 }
@@ -141,7 +164,7 @@ public class GoBackNProtocol implements IPInterfaceListener {
                 }
             }
         }
-        else{
+        else{ // Si le paquet recu est un message
            if(exp_seq_number == segment.sequenceNumber){// Si le message est celui attendu (arrivé dans l'ordre)
                last_ack = datagram;// Sauver le dernier datagram acquitte en cas d'une potentielle retransmission
                sendAcknowledgment(datagram);
@@ -158,12 +181,12 @@ public class GoBackNProtocol implements IPInterfaceListener {
         current_dest = destination;
         TCPSegment tcpSegment = new TCPSegment(segmentData, seq_number);
 
-        pending_msg.add(tcpSegment);
+        pending_msg.add(tcpSegment); // Garder les paquets a envoyer dans un buffer
 //
 //        AbstractTimer lossTimer = new SimulateLossTimer( host.getNetwork().getScheduler(), RTT/2);
 //        lossTimer.start();
 
-        if(seq_number <  window_size){
+        if(seq_number <  cwnd){ //Envoyer les premiers paquets dont les numéros de sequence sont compris dans la fenêtre d'émission
             window.add(seq_number, tcpSegment);
             send(destination,tcpSegment);
 //            host.getIPLayer().send(IPAddress.ANY, destination, IP_PROTO_GOBACKN, tcpSegment);
@@ -177,14 +200,20 @@ public class GoBackNProtocol implements IPInterfaceListener {
         seq_number++;
     }
 
+    /**
+     * Envoyer un paquet a sa destination et démarrer le timer pour le plus vieux paquet de la fenêtre d'émission
+     * @param destination
+     * @param tcpSegment
+     * @throws Exception
+     */
     private void send(IPAddress destination, TCPSegment tcpSegment) throws Exception{
-        if(send_base == next_seq_number){
+        if(send_base == next_seq_number){ // Démarrer le Timer si c'est le plus vieux paquet dans la fenêtre d'émission
             startTimer(tcpSegment);
         }
 
         if (RTTs.get(next_seq_number) == null){ // Démarrer le calcul du RTT dans le cas d'une non retransmission
             RTT rtt = new RTT(next_seq_number);
-            rtt.on_send(host.getNetwork().getScheduler());
+            rtt.on_send();
             RTTs.put(next_seq_number,rtt);
         }else { // Marquer le RTT de referencement du message comme une retransmission pour ne pas le prendre en compte dans le calcul
             RTTs.get(next_seq_number).retransmission = true;
@@ -196,15 +225,24 @@ public class GoBackNProtocol implements IPInterfaceListener {
     }
 
     public void timeOut() throws Exception{
-	    if (isSlowStart){
-	        sstresh = cwnd/2;
-	        isSlowStart = false;
-        }else {
-	        cwnd = MSS;
-	        sstresh = sstresh/2;
-	        isSlowStart = true;
-        }
+        /**
+         * Timeout, enter slow start
+         */
+        setCwnd(MSS);
+        ssthresh = ssthresh/2;
+        isSlowStart = true;
 
+//	    if (isSlowStart){ // Si en phase Slow start
+//            ssthresh = cwnd/2;
+//	        isSlowStart = false;
+//        }else { // Si en phase AIMD (Congestion Avoidance)
+//	        cwnd = MSS;
+//            ssthresh = ssthresh/2;
+//	        isSlowStart = true;
+//        }
+        /**
+         * Démarrer le timer et retransmettre tous les paquets depuis le dernier non acquitté;
+         */
 	    startTimer(window.get(send_base));
         for(int i = send_base; i < next_seq_number; i++){
             host.getIPLayer().send(IPAddress.ANY, current_dest, IP_PROTO_GOBACKN, window.get(i));
@@ -221,16 +259,12 @@ public class GoBackNProtocol implements IPInterfaceListener {
         host.getIPLayer().send(IPAddress.ANY, lastDatagramAck.src, IP_PROTO_GOBACKN, new TCPSegment(segment.sequenceNumber));
     }
 
-    public void setWindow_size(int window_size){
-	    this.window_size = window_size;
-    }
-
     public void startTimer(TCPSegment tcpSegment){
 	    if(timer != null){
             timer.stop();
         }
 
-	    timer = new MyTimer(tcpSegment, host.getNetwork().getScheduler(), rtt);
+	    timer = new MyTimer(tcpSegment, host.getNetwork().getScheduler(), RTT.RTO);
         timer.start();
     }
 
@@ -277,20 +311,46 @@ public class GoBackNProtocol implements IPInterfaceListener {
      * Augmentation additive de la fenêtre de congestion
      */
     private void addIncrease(){ // Additive increase
-        cwnd = cwnd + (MSS * MSS / cwnd);
+        System.out.println("Congestion control (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)"
+                + "Additive increase" + "[ssthresh=" + ssthresh + "]");
+        setCwnd(cwnd + (MSS * MSS / cwnd));
     }
 
     /**
      * Diminution multiplicative de la fenêtre de congestion
      */
-    private void multDecrease(){ // Multiplicative decrease
-        cwnd = cwnd / 2;
+    private void multiplDecrease(){ // Multiplicative decrease
+        ssthresh = cwnd / 2;
+        System.out.println("Congestion control (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)"
+                + " Multiplicative decrease " + " [ssthresh=" + ssthresh + "]");
+
+        setCwnd(ssthresh);
     }
 
     /**
-     * Incremente la fenetre de congestion d'un MSS en phase de Slow start
+     * Incrementer la fenêtre de congestion d'un MSS en phase de Slow start
      */
     private void slowStart(){
-	    cwnd = cwnd + MSS;
+        System.out.println("Congestion control (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)"
+                + " Slow Start" + " [ssthresh=" + ssthresh + "]");
+        setCwnd(cwnd + MSS);
+    }
+
+    private  void setCwnd(int cwnd){
+        this.cwnd = cwnd;
+
+        System.out.println("Window size (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)" +
+                " [cwnd=" + cwnd + "], [send base=" + send_base + "], [next sequence number=" + next_seq_number + "]");
+
+    }
+
+    private void init_log_cwn(){
+        System.out.println("Window size (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)" +
+                " [cwnd=" + cwnd + "], [send base=" + send_base + "], [next sequence number=" + next_seq_number + "]");
+    }
+
+    private void init_log_congControl(){
+        System.out.println("Congestion control (" + (int) (host.getNetwork().getScheduler().getCurrentTime()*1000) + "ms)"
+                + " Slow Start" + " [ssthresh=" + ssthresh + "]");
     }
 }

@@ -14,7 +14,7 @@ public class RTT {
     private Double receiveTime; //Receive Time
 
 //    public static int LastSqNb = -1; //Last Paket sequence treated
-    private static double RTT = 0; // RTT Value
+    private static double RTTValue = 0; // RTT Value
     public static double RTO = 3000; //RTO value = Retransmission Time Out
     private static double SRTT = RTO; //Estimated RTT, which is the smooth RTT
     private static double DevRTT = RTO / 2 ; //
@@ -23,7 +23,7 @@ public class RTT {
     private int seq_number;
     public boolean retransmission = false; // Savoir si c'est une retransmission du message
 
-//    public static AbstractScheduler scheduler;
+    public static AbstractScheduler scheduler;
 
 //    public static double waitTimeReceive = 0; //retain the value of the RTO or sRRT to apply to the window of the listener.
 
@@ -50,24 +50,27 @@ public class RTT {
 //    }
 
     public RTT(int sequenceNumber){
-//        this.scheduler = scheduler;
         this.seq_number = sequenceNumber;
     }
 
-    public void on_send(AbstractScheduler scheduler){
+    public void on_send(){
         transmissionTime = scheduler.getCurrentTime();
     }
 
-    public void on_receive(AbstractScheduler scheduler){
+    public void on_receive(){
         receiveTime = scheduler.getCurrentTime();
-        RTT = receiveTime - transmissionTime;
-        calcul_RTO(RTT);
+        RTTValue = receiveTime - transmissionTime;
+
+        calcul_RTO(RTTValue);
     }
 
     private void calcul_RTO(Double RTT){
         SRTT = (1 - alpha) * SRTT + alpha * RTT;
         DevRTT = (1 - beta) * DevRTT + beta * Math.abs(SRTT - RTT);
         RTO = SRTT + 4 * DevRTT;
+
+        System.out.println("Calcul RTT and RTO (" + (int) (scheduler.getCurrentTime()*1000) + "ms)" +
+                " Sequence Number=" + seq_number + ", [RTT value=" + RTT*1000 + "ms]" + ", [RTO value=" + RTO*1000 + "ms]");
     }
 
 //    public RTT() {
